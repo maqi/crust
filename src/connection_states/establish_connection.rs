@@ -37,11 +37,11 @@ impl EstablishConnection {
             socket: Some(socket),
         };
 
-        let token = core.get_new_token();
+        let token = core.get_token();
         event_loop.register(connection.socket.as_ref().expect("Logic Error"),
                             token,
                             EventSet::error() | EventSet::writable(),
-                            PollOpt::edge())
+                            PollOpt::all())
                   .expect("Could not register socket with EventLoop<Core>");
 
         let _ = core.insert_context(token, context.clone());

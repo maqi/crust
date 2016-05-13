@@ -36,6 +36,10 @@ impl Core {
         Token(token_counter)
     }
 
+    pub fn get_token(&mut self) -> Token {
+        Token(self.token_counter.clone())
+    }
+
     pub fn get_new_context(&mut self) -> Context {
         let context_counter = self.context_counter;
         self.context_counter = context_counter.wrapping_add(1);

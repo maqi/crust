@@ -33,7 +33,7 @@ impl ActiveConnection {
                routing_tx: Sender<CrustMsg>) {
         println!("Entered state ActiveConnection");
 
-        let token = core.get_new_token();
+        let token = core.get_token();
         let peer_id = ::rand::random();
 
         let connection = ActiveConnection {
@@ -48,12 +48,6 @@ impl ActiveConnection {
             routing_tx: routing_tx,
         };
 
-        event_loop.reregister(&connection.socket,
-                              token,
-                              EventSet::readable() | EventSet::error() | EventSet::hup(),
-                              PollOpt::edge())
-                  .expect("Could not re-register socket with EventLoop<Core>");
-
         let _ = connection.cm.lock().unwrap().insert(peer_id, context.clone());
         let _ = connection.routing_tx.send(CrustMsg::NewConnection(peer_id));
         let _ = core.insert_context(token, context.clone());
@@ -62,7 +56,7 @@ impl ActiveConnection {
 
     fn read(&mut self, core: &mut Core, event_loop: &mut EventLoop<Core>, token: Token) {
         let mut buf = vec![0; 10];
-        match self.reader.read(&mut buf) {
+        match self.socket.read(&mut buf) {
             Ok(_bytes_rxd) => {
                 let _ = self.routing_tx.send(CrustMsg::NewMessage(self.peer_id, buf));
             }
@@ -83,6 +77,10 @@ impl ActiveConnection {
                         data = data[bytes_txd..].to_owned();
                         self.write_queue.push_front(data);
                     }
+                    if self.write_queue.is_empty() {
+                        event_loop.reregister(&self.socket, self.token, EventSet::readable(), PollOpt::all())
+                                  .expect("Could not reregister socket");
+                    }
                 }
                 Err(e) => {
                     if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted {
@@ -94,15 +92,6 @@ impl ActiveConnection {
                 }
             }
         }
-
-        let event_set = if self.write_queue.is_empty() {
-            EventSet::readable() | EventSet::error() | EventSet::hup()
-        } else {
-            EventSet::readable() | EventSet::writable() | EventSet::error() | EventSet::hup()
-        };
-
-        event_loop.reregister(&self.socket, self.token, event_set, PollOpt::edge())
-                  .expect("Could not reregister socket");
     }
 }
 
@@ -131,7 +120,5 @@ impl State for ActiveConnection {
 
     fn write(&mut self, core: &mut Core, event_loop: &mut EventLoop<Core>, data: Vec<u8>) {
         self.write_queue.push_back(data);
-        let token = self.token;
-        self.write(core, event_loop, token);
     }
 }

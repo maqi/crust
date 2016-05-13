@@ -11,5 +11,5 @@ version = "0.12.0"
 
 [dependencies]
 maidsafe_utilities = "~0.5.4"
-mio = "~0.5.1"
+mio = { git = "https://github.com/carllerche/mio.git" }
 rand = "*"
