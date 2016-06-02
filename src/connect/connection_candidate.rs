@@ -81,7 +81,7 @@ impl ConnectionCandidate {
         if self.connection_exists() {
             return self.terminate(core, event_loop);
         }
-
+if self.socket.as_mut().is_some() {
         match self.socket.as_mut().unwrap().write(event_loop, self.token, msg) {
             Ok(true) => self.finish(core, event_loop),
             Ok(false) => (),
@@ -89,6 +89,9 @@ impl ConnectionCandidate {
                 error!("Failed to write to socket: {:?}", error);
                 self.terminate(core, event_loop);
             }
+        }
+ } else {
+            println!("failed to get socket");
         }
     }
 
@@ -100,8 +103,9 @@ impl ConnectionCandidate {
         if let Some(context) = core.remove_context(self.token) {
             let _ = core.remove_state(context);
         }
-
-        let socket = self.socket.take().unwrap();
+let temp_socket = self.socket.take();
+if temp_socket.is_some() {
+        let socket = temp_socket.unwrap();
 
         ActiveConnection::start(core,
                                 event_loop,
@@ -112,6 +116,7 @@ impl ConnectionCandidate {
                                 self.event_tx.clone());
 
         let _ = self.event_tx.send(Event::NewPeer(Ok(()), self.their_id));
+}
     }
 
     fn connection_exists(&self) -> bool {
