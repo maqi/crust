@@ -490,6 +490,8 @@ mod tests {
     use std::time::Duration;
 
     use event::Event;
+    use peer_id::{self, PeerId};
+    use rand;
     use tests::{get_event_sender, timebomb};
 
     #[test]
@@ -562,7 +564,6 @@ mod tests {
                          event_rx_0: &Receiver<Event>,
                          service_1: &Service,
                          event_rx_1: &Receiver<Event>) {
-        use rand;
         use std::iter;
 
         let id_0 = service_0.id();
@@ -607,131 +608,141 @@ mod tests {
         }
     }
 
+    const NUM_SERVICES: usize = 5;
+    const MSG_SIZE: usize = 1024;
+    const NUM_MSGS: usize = 10;
+
+    struct TestNode {
+        event_rx: Receiver<Event>,
+        service: Service,
+        connection_id_rx: Receiver<PubConnectionInfo>,
+        our_cis: Vec<PrivConnectionInfo>,
+        our_index: usize,
+        our_id: PeerId,
+    }
+
+    impl TestNode {
+        fn new(index: usize) -> (TestNode, mpsc::Sender<PubConnectionInfo>) {
+            let (event_sender, event_rx) = get_event_sender();
+            let config = unwrap_result!(::config_handler::read_config_file());
+            let mut service = unwrap_result!(Service::with_config(event_sender, config));
+            // Start listener so that the test works without hole punching.
+            assert!(service.start_listening_tcp().is_ok());
+            match unwrap_result!(event_rx.recv()) {
+                Event::ListenerStarted(_) => (),
+                m => panic!("Unexpected event: {:?}", m),
+            }
+            let (ci_tx, ci_rx) = mpsc::channel();
+            let our_id = peer_id::new(service.our_keys.0.clone());
+            (TestNode {
+                event_rx: event_rx,
+                service: service,
+                connection_id_rx: ci_rx,
+                our_cis: Vec::new(),
+                our_index: index,
+                our_id: our_id,
+            },
+             ci_tx)
+        }
+
+        fn make_connection_infos(&mut self, ci_txs: &[mpsc::Sender<PubConnectionInfo>]) {
+            for (i, ci_tx) in ci_txs.iter().enumerate() {
+                if i == self.our_index {
+                    continue;
+                }
+
+                let our_ci = prepare_connection_info(&mut self.service, &self.event_rx);
+                let their_ci = our_ci.to_pub_connection_info();
+                let _ = ci_tx.send(their_ci);
+                self.our_cis.push(our_ci);
+            }
+        }
+
+        fn run(self, send_barrier: Arc<Barrier>, drop_barrier: Arc<Barrier>) -> JoinHandle<()> {
+            thread!("run!", move || {
+                // let mut index = 0;
+                for (our_ci, their_ci) in self.our_cis
+                    .into_iter()
+                    .zip(self.connection_id_rx.into_iter()) {
+                    // if index >= self.our_index {
+                        let _ = self.service.connect(our_ci, their_ci);
+                    // }
+                    // index += 1;
+                }
+                let mut their_ids = HashMap::new();
+                let mut i = 0;
+                while i < NUM_SERVICES - 1 {
+                    let their_id = match unwrap_result!(self.event_rx.recv()) {
+                        Event::NewPeer(Ok(()), their_id) => their_id,
+                        Event::NewPeer(Err(_), _) => continue,
+                        m => panic!("Expected NewPeer message. Got message {:?}", m),
+                    };
+                    match their_ids.insert(their_id, 0u32) {
+                        Some(_) => panic!("Received two NewPeer events for same peer!"),
+                        None => (),
+                    };
+                    i += 1;
+                }
+
+println!("vault {} - {:?} completed connection", self.our_index, self.our_id);
+                // Wait until all nodes have connected to each other before we start
+                // exchanging messages.
+                let _ = send_barrier.wait();
+
+                for their_id in their_ids.keys() {
+                    for n in 0..NUM_MSGS {
+                        let mut msg = Vec::with_capacity(MSG_SIZE);
+                        for _ in 0..MSG_SIZE {
+                            msg.push(n as u8);
+                        }
+                        let _ = self.service.send(*their_id, msg, 0);
+                    }
+                }
+println!("vault {} completed sending", self.our_index);
+                for _i in 0..((NUM_SERVICES - 1) * NUM_MSGS) {
+// println!("vault {} waiting for msg {}", self.our_index, _i);
+                    match unwrap_result!(self.event_rx.recv()) {
+                        Event::NewMessage(their_id, msg) => {
+                            let n = msg[0];
+                            assert_eq!(msg.len(), MSG_SIZE);
+                            for m in msg {
+                                assert_eq!(n, m);
+                            }
+                            match their_ids.entry(their_id.clone()) {
+                                hash_map::Entry::Occupied(mut oe) => {
+                                    let next_msg = oe.get_mut();
+                                    assert_eq!(*next_msg as u8, n);
+                                    *next_msg += 1;
+                                }
+                                hash_map::Entry::Vacant(_) => panic!("impossible!"),
+                            }
+                        }
+                        m => panic!("Unexpected msg receiving NewMessage: {:?}", m),
+                    }
+                }
+println!("vault {:?} completed sending msg", self.our_id);
+                // Wait until all nodes have finished exchanging messages before we start
+                // disconnecting.
+                let _ = drop_barrier.wait();
+println!("vault {:?} dropping service", self.our_id);
+                drop(self.service);
+                match self.event_rx.recv() {
+                    Ok(m) => {
+                        match m {
+                            Event::LostPeer(..) => (),
+                            _ => panic!("Unexpected message when shutting down: {:?}", m),
+                        }
+                    }
+                    Err(mpsc::RecvError) => (),
+                }
+println!("vault {} finished", self.our_index);
+            })
+        }
+    }
+
     #[test]
     #[ignore]
     fn sending_receiving_multiple_services() {
-        const NUM_SERVICES: usize = 10;
-        const MSG_SIZE: usize = 1024;
-        const NUM_MSGS: usize = 257;
-
-        struct TestNode {
-            event_rx: Receiver<Event>,
-            service: Service,
-            connection_id_rx: Receiver<PubConnectionInfo>,
-            our_cis: Vec<PrivConnectionInfo>,
-            our_index: usize,
-        }
-
-        impl TestNode {
-            fn new(index: usize) -> (TestNode, mpsc::Sender<PubConnectionInfo>) {
-                let (event_sender, event_rx) = get_event_sender();
-                let config = unwrap_result!(::config_handler::read_config_file());
-                let mut service = unwrap_result!(Service::with_config(event_sender, config));
-                // Start listener so that the test works without hole punching.
-                assert!(service.start_listening_tcp().is_ok());
-                match unwrap_result!(event_rx.recv()) {
-                    Event::ListenerStarted(_) => (),
-                    m => panic!("Unexpected event: {:?}", m),
-                }
-                let (ci_tx, ci_rx) = mpsc::channel();
-                (TestNode {
-                    event_rx: event_rx,
-                    service: service,
-                    connection_id_rx: ci_rx,
-                    our_cis: Vec::new(),
-                    our_index: index,
-                },
-                 ci_tx)
-            }
-
-            fn make_connection_infos(&mut self, ci_txs: &[mpsc::Sender<PubConnectionInfo>]) {
-                for (i, ci_tx) in ci_txs.iter().enumerate() {
-                    if i == self.our_index {
-                        continue;
-                    }
-
-                    let our_ci = prepare_connection_info(&mut self.service, &self.event_rx);
-                    let their_ci = our_ci.to_pub_connection_info();
-                    let _ = ci_tx.send(their_ci);
-                    self.our_cis.push(our_ci);
-                }
-            }
-
-            fn run(self, send_barrier: Arc<Barrier>, drop_barrier: Arc<Barrier>) -> JoinHandle<()> {
-                thread!("run!", move || {
-                    for (our_ci, their_ci) in self.our_cis
-                        .into_iter()
-                        .zip(self.connection_id_rx.into_iter()) {
-                        let _ = self.service.connect(our_ci, their_ci);
-                    }
-                    let mut their_ids = HashMap::new();
-                    let mut i = 0;
-                    while i < NUM_SERVICES - 1 {
-                        let their_id = match unwrap_result!(self.event_rx.recv()) {
-                            Event::NewPeer(Ok(()), their_id) => their_id,
-                            Event::NewPeer(Err(_), _) => continue,
-                            m => panic!("Expected NewPeer message. Got message {:?}", m),
-                        };
-                        match their_ids.insert(their_id, 0u32) {
-                            Some(_) => panic!("Received two NewPeer events for same peer!"),
-                            None => (),
-                        };
-                        i += 1;
-                    }
-
-                    // Wait until all nodes have connected to each other before we start
-                    // exchanging messages.
-                    let _ = send_barrier.wait();
-
-                    for their_id in their_ids.keys() {
-                        for n in 0..NUM_MSGS {
-                            let mut msg = Vec::with_capacity(MSG_SIZE);
-                            for _ in 0..MSG_SIZE {
-                                msg.push(n as u8);
-                            }
-                            let _ = self.service.send(*their_id, msg, 0);
-                        }
-                    }
-
-                    for _ in 0..((NUM_SERVICES - 1) * NUM_MSGS) {
-                        match unwrap_result!(self.event_rx.recv()) {
-                            Event::NewMessage(their_id, msg) => {
-                                let n = msg[0];
-                                assert_eq!(msg.len(), MSG_SIZE);
-                                for m in msg {
-                                    assert_eq!(n, m);
-                                }
-                                match their_ids.entry(their_id.clone()) {
-                                    hash_map::Entry::Occupied(mut oe) => {
-                                        let next_msg = oe.get_mut();
-                                        assert_eq!(*next_msg as u8, n);
-                                        *next_msg += 1;
-                                    }
-                                    hash_map::Entry::Vacant(_) => panic!("impossible!"),
-                                }
-                            }
-                            m => panic!("Unexpected msg receiving NewMessage: {:?}", m),
-                        }
-                    }
-
-                    // Wait until all nodes have finished exchanging messages before we start
-                    // disconnecting.
-                    let _ = drop_barrier.wait();
-
-                    drop(self.service);
-                    match self.event_rx.recv() {
-                        Ok(m) => {
-                            match m {
-                                Event::LostPeer(..) => (),
-                                _ => panic!("Unexpected message when shutting down: {:?}", m),
-                            }
-                        }
-                        Err(mpsc::RecvError) => (),
-                    }
-                })
-            }
-        }
-
         let mut test_nodes = Vec::new();
         let mut ci_txs = Vec::new();
         for i in 0..NUM_SERVICES {
@@ -752,7 +763,7 @@ mod tests {
             let drop_barrier = drop_barrier.clone();
             threads.push(test_node.run(send_barrier, drop_barrier));
         }
-
+println!("1");
         // Wait one hundred millisecond per message
         // TODO(canndrew): drop this limit
         let timeout_ms = 10000 * (NUM_MSGS * (NUM_SERVICES * (NUM_SERVICES - 1)) / 2) as u64;

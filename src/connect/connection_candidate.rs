@@ -83,7 +83,7 @@ impl ConnectionCandidate {
         if self.cm.lock().unwrap().contains_key(&self.their_id) {
             return self.terminate(core, event_loop);
         }
-
+if self.socket.as_mut().is_some() {
         match self.socket.as_mut().unwrap().write(event_loop, self.token, msg) {
             Ok(true) => self.finish(core, event_loop),
             Ok(false) => (),
@@ -92,14 +92,18 @@ impl ConnectionCandidate {
                 self.terminate(core, event_loop);
             }
         }
+ } else {
+            println!("failed to get socket");
+        }
     }
 
     fn finish(&mut self, core: &mut Core, event_loop: &mut EventLoop<Core>) {
         if let Some(context) = core.remove_context(self.token) {
             let _ = core.remove_state(context);
         }
-
-        let socket = self.socket.take().unwrap();
+let temp_socket = self.socket.take();
+if temp_socket.is_some() {
+        let socket = temp_socket.unwrap();
 
         ActiveConnection::start(core,
                                 event_loop,
@@ -110,7 +114,9 @@ impl ConnectionCandidate {
                                 self.our_id,
                                 Event::NewPeer(Ok(()), self.their_id),
                                 self.event_tx.clone());
+        // let _ = self.event_tx.send(Event::NewPeer(Ok(()), self.their_id));
     }
+}
 }
 
 impl State for ConnectionCandidate {

@@ -75,23 +75,31 @@ impl TryPeer {
     }
 
     fn write(&mut self, core: &mut Core, event_loop: &mut EventLoop<Core>, msg: Option<Message>) {
-        if self.socket.as_mut().unwrap().write(event_loop, self.token, msg).is_err() {
-            self.handle_error(core, event_loop);
+        if self.socket.as_mut().is_some() {
+            if self.socket.as_mut().unwrap().write(event_loop, self.token, msg).is_err() {
+                self.handle_error(core, event_loop);
+            }
+        } else {
+            println!("failed to get socket");
         }
     }
 
     fn receive_response(&mut self, core: &mut Core, event_loop: &mut EventLoop<Core>) {
-        match self.socket.as_mut().unwrap().read::<Message>() {
-            Ok(Some(Message::BootstrapResponse(peer_pk))) => {
-                let _ = core.remove_context(self.token);
-                let _ = core.remove_state(self.context);
-                let context = self.context;
-                let data =
-                    (self.socket.take().expect("Logic Error"), self.token, peer_id::new(peer_pk));
-                (*self.finish)(core, event_loop, context, Ok(data));
-            }
-            Ok(None) => (),
-            Ok(Some(_)) | Err(_) => self.handle_error(core, event_loop),
+		if self.socket.as_mut().is_some() {
+			match self.socket.as_mut().unwrap().read::<Message>() {
+				Ok(Some(Message::BootstrapResponse(peer_pk))) => {
+					let _ = core.remove_context(self.token);
+					let _ = core.remove_state(self.context);
+					let context = self.context;
+					let data =
+						(self.socket.take().expect("Logic Error"), self.token, peer_id::new(peer_pk));
+					(*self.finish)(core, event_loop, context, Ok(data));
+				}
+				Ok(None) => (),
+				Ok(Some(_)) | Err(_) => self.handle_error(core, event_loop),
+			}
+		} else {
+            println!("failed to get socket");
         }
     }
 
